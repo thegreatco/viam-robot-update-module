@@ -18,7 +18,7 @@ from viam.proto.common import ResourceName
 from viam.resource.base import ResourceBase
 from viam.resource.registry import Registry, ResourceCreatorRegistration
 from viam.resource.types import Model, ModelFamily
-from viam.utils import SensorReading, ValueTypes
+from viam.utils import ValueTypes
 
 LOGGER = getLogger(__name__)
 Namespace = "tennibot"
@@ -59,6 +59,25 @@ async def getAppClientFromApiCredentials(apiKeyName, apiKey) -> AppClient:
     client = await ViamClient.create_from_dial_options(dial_options)
     return client.app_client
 
+def swap_fragment_id(oldFragmentId: str, newFragmentId: str, conf:Mapping[str, ValueTypes]) -> None:
+    # Get the fragments (or an empty array if fragments is not found)
+    fragments = conf.get("fragments", [])
+
+    # Filter out the old fragmentId, we also do the new fragmentId to prevent duplicates, just in case
+    filteredFragments = list(filter(lambda x: x != oldFragmentId and x != newFragmentId, fragments))
+    # Log the fragments found, this is mostly for debugging
+    for fragment in fragments:
+        LOGGER.info(f"Found fragment: {fragment}")
+
+    filteredFragments.append(newFragmentId)
+
+    # Set the fragments to an array of just the fragmentId
+    conf["fragments"] = filteredFragments
+
+    for mod in conf.get("fragment_mods", []):
+        if mod.get("fragment_id", "") == oldFragmentId:
+            mod["fragment_id"] = newFragmentId
+
 class UpdateModule(Generic):
     MODEL: ClassVar[Model] = Model(ModelFamily(Namespace, "robot"), "update")
 
@@ -80,40 +99,37 @@ class UpdateModule(Generic):
             cmd = command["command"]
             if cmd == "update":
                 LOGGER.info(f"Update command received: {command}")
-                if "newFragmentId" not in command:
-                    return {"error": "No newFragmentId provided"}
-                newFragmentId = command["newFragmentId"]
+                newFragmentId = command.get("newFragmentId", "")
                 if newFragmentId == "":
-                    return {"error": "Empty newFragmentId provided"}
-                if "oldFragmentId" not in command:
-                    return {"error": "No oldFragmentId provided"}
-                oldFragmentId = command["oldFragmentId"]
+                    return {"error": "newFragmentId missing"}
+                oldFragmentId = command.get("oldFragmentId", "")
                 if oldFragmentId == "":
-                    return {"error": "Empty oldFragmentId provided"}
-                if "robotId" not in command:
-                    return {"error": "No robotId provided"}
-                robotId = command["robotId"]
+                    return {"error": "oldFragmentId missing"}
+                robotId = command.get("robotId", "")
                 if robotId == "":
-                    return {"error": "Empty robotId provided"}
+                    return {"error": "robotId missing"}
 
                 client: AppClient = None
                 if "apiKeyName" not in command or "apiKey" not in command:
                     LOGGER.debug("No API key provided, trying to use robot credentials")
-                    cloudId, cloudSecret = getCredentialsFromConfig()
-                    client = await getAppClientFromConfigCredentials(cloudId, cloudSecret)
+                    try:
+                        cloudId, cloudSecret = getCredentialsFromConfig()
+                        client = await getAppClientFromConfigCredentials(cloudId, cloudSecret)
+                    except Exception as e:
+                        LOGGER.error(f"Error getting client: {e}")
                 else:
                     LOGGER.debug("API key provided, using it")
                     client = await getAppClientFromApiCredentials(command["apiKeyName"], command["apiKey"])
                 
                 if client is None:
-                    return {"error": "No client created, missing robot credentials and no API key provided"}
+                    return {"error": "credentials not found"}
                 LOGGER.debug(f"Client created, updating configuration for robot {robotId} with fragment {newFragmentId}")
                 await self.updateFragment(client, robotId, oldFragmentId, newFragmentId)
                 
                 if client is not None and client._channel is not None:
                     client._channel.close()
                 return {"ok": 1}
-        return {"error": "No command provided"}
+        return {"error": "no command provided"}
     
     async def updateFragment(self, client: AppClient, robotId: str, oldFragmentId: str, newFragmentId: str) -> Mapping[str, ValueTypes]:
         try:
@@ -139,19 +155,9 @@ class UpdateModule(Generic):
                 # Get the robot configuration
                 conf = part.robot_config
 
-                # Get the fragments (or an empty array if fragments is not found)
-                fragments = conf.get("fragments", [])
-
-                # Filter out the old fragmentId, we also do the new fragmentId to prevent duplicates, just in case
-                filteredFragments = list(filter(lambda x: x.id != oldFragmentId and x.id != newFragmentId, fragments))
-                # Log the fragments found, this is mostly for debugging
-                for fragment in fragments:
-                    LOGGER.info(f"Found fragment: {fragment}")
-
-                filteredFragments.append(newFragmentId)
-
-                # Set the fragments to an array of just the fragmentId
-                conf["fragments"] = filteredFragments
+                # Swap the fragmentId
+                swap_fragment_id(oldFragmentId, newFragmentId, conf)
+                
                 LOGGER.debug(f"New configuration: {conf}")
                 try:
                     # Update the robot part with the new configuration
@@ -172,7 +178,6 @@ class UpdateModule(Generic):
 
     async def close(self):
         LOGGER.info(f"{self.name} is closed.")
-
 
 async def main():
     """This function creates and starts a new module, after adding all desired resource models.

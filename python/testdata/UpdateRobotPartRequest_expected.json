@@ -1,0 +1,50 @@
+{
+    "id": "409a5842-147b-473c-a5ee-136be981eab6",
+    "robotConfig": {
+        "agent_config": {
+            "subsystems": {
+                "agent-provisioning": {
+                    "disable_subsystem": false,
+                    "pin_url": "",
+                    "pin_version": "",
+                    "release_channel": "stable"
+                },
+                "agent-syscfg": {
+                    "disable_subsystem": false,
+                    "pin_url": "",
+                    "pin_version": "",
+                    "release_channel": "stable"
+                },
+                "viam-agent": {
+                    "disable_subsystem": false,
+                    "pin_url": "",
+                    "pin_version": "",
+                    "release_channel": "stable"
+                },
+                "viam-server": {
+                    "disable_subsystem": false,
+                    "pin_url": "",
+                    "pin_version": "",
+                    "release_channel": "stable"
+                }
+            }
+        },
+        "components": [],
+        "fragment_mods": [
+            {
+                "fragment_id": "6abb7bab-769c-4a31-a13b-0f7efa7ab670",
+                "mods": [
+                    {
+                        "$set": {
+                            "components.fan.attributes.temperature_table.40": 60
+                        }
+                    }
+                ]
+            }
+        ],
+        "fragments": [
+            "6abb7bab-769c-4a31-a13b-0f7efa7ab670"
+        ],
+        "modules": []
+    }
+}

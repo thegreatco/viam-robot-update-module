@@ -1,0 +1,9 @@
+{
+    "robot":{
+        "id": "",
+        "name": "Robot",
+        "location": "aslkjfasld",
+        "last_access": "$ONLINEDATE",
+        "created_on": "2024-01-01T00:00:00Z"
+    }
+}
