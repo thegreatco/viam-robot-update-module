@@ -57,7 +57,7 @@ type RobotUpdateModule struct {
 
 // Close implements resource.Resource.
 func (*RobotUpdateModule) Close(ctx context.Context) error {
-	panic("unimplemented")
+	return nil
 }
 
 // Reconfigure implements resource.Resource.
@@ -70,13 +70,18 @@ func (b *RobotUpdateModule) DoCommand(ctx context.Context, cmd map[string]interf
 		switch command {
 		case "update":
 			b.logger.Infof("Received update command")
-			if _, ok = cmd["fragmentId"]; ok {
-				fragmentId, ok := cmd["fragmentId"].(string)
-				if !ok {
-					return map[string]interface{}{"error": "No fragmentId provided"}, nil
+			if _, ok = cmd["newFragmentId"]; ok {
+				newFragmentId, ok := cmd["newFragmentId"].(string)
+				if !ok || newFragmentId == "" {
+					return map[string]interface{}{"error": "No newFragmentId provided"}, nil
 				}
+				oldFragmentId, ok := cmd["oldFragmentId"].(string)
+				if !ok || oldFragmentId == "" {
+					return map[string]interface{}{"error": "No oldFragmentId provided"}, nil
+				}
+
 				robotId, ok := cmd["robotId"].(string)
-				if !ok {
+				if !ok || robotId == "" {
 					return map[string]interface{}{"error": "No robotId provided"}, nil
 				}
 				var client app_proto.AppServiceClient
@@ -102,7 +107,7 @@ func (b *RobotUpdateModule) DoCommand(ctx context.Context, cmd map[string]interf
 						return map[string]interface{}{"error": err}, err
 					}
 				}
-				return b.updateFragment(ctx, client, robotId, fragmentId)
+				return b.updateFragment(ctx, client, robotId, oldFragmentId, newFragmentId)
 			} else {
 				return map[string]interface{}{"error": "No fragmentId provided"}, nil
 			}
@@ -149,7 +154,7 @@ func getAppClientFromConfigCredentials(ctx context.Context, logger *zap.SugaredL
 	return app_proto.NewAppServiceClient(conn), nil
 }
 
-func (b *RobotUpdateModule) updateFragment(ctx context.Context, client app_proto.AppServiceClient, robotId, fragmentId string) (map[string]interface{}, error) {
+func (b *RobotUpdateModule) updateFragment(ctx context.Context, client app_proto.AppServiceClient, robotId, oldFragmentId, newFragmentId string) (map[string]interface{}, error) {
 	b.logger.Infof("Received update fragmentId")
 
 	robot, err := client.GetRobot(ctx, &app_proto.GetRobotRequest{Id: robotId})
@@ -179,20 +184,50 @@ func (b *RobotUpdateModule) updateFragment(ctx context.Context, client app_proto
 		return map[string]interface{}{"error": "More than one part found for robot"}, nil
 	}
 
+	// Get the first part
 	part := parts.Parts[0]
+
+	// Get the robot configuration
 	conf := part.RobotConfig
+
+	// Create a list of fragments without the old fragment
+	newFragments := make([]interface{}, 0)
 	if f, ok := conf.Fields["fragments"]; ok {
 		fragments := f.GetListValue().Values
 		for _, fragment := range fragments {
-			b.logger.Infof("Found fragment: %v", fragment.GetStringValue())
+			b.logger.Debugf("Found fragment: %v", fragment.GetStringValue())
+			// Filter out the old fragmentId, we also do the new fragmentId to prevent duplicates, just in case
+			if fragment.GetStringValue() != oldFragmentId && fragment.GetStringValue() != newFragmentId {
+				b.logger.Debugf("Copying fragment to new fragment list: %v", fragment.GetStringValue())
+				newFragments = append(newFragments, fragment)
+			}
 		}
 	}
-	value, err := structpb.NewList([]interface{}{fragmentId})
+
+	// Add the new fragment to the list
+	newFragments = append(newFragments, newFragmentId)
+
+	// Go through the fragment_mods and update any overrides that match the old fragment
+	if mods, ok := conf.Fields["fragment_mods"]; ok {
+		fragmentMods := mods.GetListValue().Values
+		for _, fragmentMod := range fragmentMods {
+			mod := fragmentMod.GetStructValue()
+			if mod.Fields["fragment_id"].GetStringValue() == oldFragmentId {
+				b.logger.Infof("Found matching fragment_mod: %v", fragmentMod.GetStringValue())
+				// replace the old fragment_id with the new fragment_id
+				mod.Fields["fragment_id"] = &structpb.Value{Kind: &structpb.Value_StringValue{StringValue: newFragmentId}}
+			}
+		}
+	}
+
+	// Set the fragments to an array of just the fragmentId
+	value, err := structpb.NewList(newFragments)
 	if err != nil {
 		return nil, err
 	}
 	conf.Fields["fragments"] = &structpb.Value{Kind: &structpb.Value_ListValue{ListValue: value}}
 
+	// Update the robot part with the new configuration
 	_, err = client.UpdateRobotPart(ctx, &app_proto.UpdateRobotPartRequest{Id: part.Id, Name: part.Name, RobotConfig: conf})
 	if err != nil {
 		b.logger.Errorf("Error updating robot part: %v", err)

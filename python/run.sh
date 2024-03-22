@@ -39,4 +39,4 @@ fi
 # Be sure to use `exec` so that termination signals reach the python process,
 # or handle forwarding termination signals manually
 echo "Starting module..."
-exec $PYTHON src/main.py $@
+exec $PYTHON module.py $@

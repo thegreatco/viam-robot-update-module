@@ -2,12 +2,14 @@ import asyncio
 import datetime
 import json
 import os
-from typing import Any, ClassVar, Dict, Mapping, Optional, Sequence
+import ssl
+from typing import Any, ClassVar, Dict, Mapping, Optional, Sequence, Tuple
+from grpclib.client import Channel
 
 from typing_extensions import Self
 
 from viam.app.viam_client import ViamClient, AppClient
-from viam.rpc.dial import DialOptions, Credentials
+from viam.rpc.dial import AuthenticatedChannel, DialOptions, Credentials, _get_access_token
 from viam.components.generic import Generic
 from viam.logging import getLogger
 from viam.module.module import Module
@@ -21,7 +23,7 @@ from viam.utils import SensorReading, ValueTypes
 LOGGER = getLogger(__name__)
 Namespace = "tennibot"
 
-def getCredentialsFromConfig():
+def getCredentialsFromConfig() -> Tuple[str, str]:
     filePath = os.getenv("VIAM_CONFIG_FILE")
     if filePath is None or filePath == "" or not os.path.exists(filePath):
         filePath = "/etc/viam.json"
@@ -33,14 +35,29 @@ def getCredentialsFromConfig():
         if "id" not in cloud or "secret" not in cloud:
             raise ValueError("id or secret not found in cloud")
         return cloud["id"], cloud["secret"]
+    
+async def getAppClientFromConfigCredentials(cloudId, cloudSecret) -> AppClient:
+    dial_options = DialOptions(disable_webrtc=True, credentials=Credentials(type="robot-secret", payload=cloudSecret), auth_entity=cloudId)
+    channel = await dial_app("app.viam.com", dial_options)
+    return AppClient(channel, {})
 
-def getAppClientFromConfigCredentials(cloudId, cloudSecret):
-    dial_options = DialOptions(credentials=Credentials(type="robot-secret", payload=cloudSecret), auth_entity=cloudId)
-    return ViamClient.create_from_dial_options(dial_options)
+async def dial_app(address: str, options: DialOptions) -> Channel:
+    ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20")
+    ctx.set_alpn_protocols(["h2"])
 
-def getAppClientFromApiCredentials(apiKeyName, apiKey):
+    channel = AuthenticatedChannel(address, 443, ssl=ctx)
+    access_token = await _get_access_token(channel, address, options)
+    metadata = {"authorization": f"Bearer {access_token}"}
+    channel._metadata = metadata
+
+    return channel
+
+async def getAppClientFromApiCredentials(apiKeyName, apiKey) -> AppClient:
     dial_options = DialOptions.with_api_key(apiKey, apiKeyName)
-    return ViamClient.create_from_dial_options(dial_options)
+    client = await ViamClient.create_from_dial_options(dial_options)
+    return client.app_client
 
 class UpdateModule(Generic):
     MODEL: ClassVar[Model] = Model(ModelFamily(Namespace, "robot"), "update")
@@ -63,33 +80,50 @@ class UpdateModule(Generic):
             cmd = command["command"]
             if cmd == "update":
                 LOGGER.info(f"Update command received: {command}")
-                if "fragmentId" not in command:
-                    return {"error": "No fragmentId provided"}
-                fragmentId = command["fragmentId"]
+                if "newFragmentId" not in command:
+                    return {"error": "No newFragmentId provided"}
+                newFragmentId = command["newFragmentId"]
+                if newFragmentId == "":
+                    return {"error": "Empty newFragmentId provided"}
+                if "oldFragmentId" not in command:
+                    return {"error": "No oldFragmentId provided"}
+                oldFragmentId = command["oldFragmentId"]
+                if oldFragmentId == "":
+                    return {"error": "Empty oldFragmentId provided"}
                 if "robotId" not in command:
                     return {"error": "No robotId provided"}
                 robotId = command["robotId"]
+                if robotId == "":
+                    return {"error": "Empty robotId provided"}
 
-                client: ViamClient = None
+                client: AppClient = None
                 if "apiKeyName" not in command or "apiKey" not in command:
+                    LOGGER.debug("No API key provided, trying to use robot credentials")
                     cloudId, cloudSecret = getCredentialsFromConfig()
-                    client = getAppClientFromConfigCredentials(cloudId, cloudSecret)
+                    client = await getAppClientFromConfigCredentials(cloudId, cloudSecret)
                 else:
-                    client = getAppClientFromApiCredentials(command["apiKeyName"], command["apiKey"])
+                    LOGGER.debug("API key provided, using it")
+                    client = await getAppClientFromApiCredentials(command["apiKeyName"], command["apiKey"])
                 
                 if client is None:
-                    return {"error": "No client created"}
+                    return {"error": "No client created, missing robot credentials and no API key provided"}
+                LOGGER.debug(f"Client created, updating configuration for robot {robotId} with fragment {newFragmentId}")
+                await self.updateFragment(client, robotId, oldFragmentId, newFragmentId)
                 
-                self.updateFragment(client.app_client, robotId, fragmentId)
-        return command
+                if client is not None and client._channel is not None:
+                    client._channel.close()
+                return {"ok": 1}
+        return {"error": "No command provided"}
     
-    async def updateFragment(self, client: AppClient, robotId: str, fragmentId: str) -> Mapping[str, ValueTypes]:
+    async def updateFragment(self, client: AppClient, robotId: str, oldFragmentId: str, newFragmentId: str) -> Mapping[str, ValueTypes]:
         try:
             robot = await client.get_robot(robotId)
             if robot is None:
                 return {"error": "Robot not found"}
-            if robot.last_access is None or robot.last_access < datetime.now() - datetime.timedelta(minutes=1):
+            if robot.last_access is None or robot.last_access.ToDatetime() < datetime.datetime.now() - datetime.timedelta(minutes=1):
                 return {"error": "Robot not accessed in the last 60 seconds"}
+            LOGGER.debug(f"Robot found: {robot}")
+
             try:
                 parts = await client.get_robot_parts(robotId)
                 if parts is None or len(parts) == 0:
@@ -97,13 +131,30 @@ class UpdateModule(Generic):
                 if len(parts) > 1:
                     return {"error": f"More than one part found for robot: {robotId}"}
                 
+                # Get the first part
                 part = parts[0]
+
+                LOGGER.debug(f"Robot part found: {part}")
+
+                # Get the robot configuration
                 conf = part.robot_config
+
+                # Get the fragments (or an empty array if fragments is not found)
                 fragments = conf.get("fragments", [])
+
+                # Filter out the old fragmentId, we also do the new fragmentId to prevent duplicates, just in case
+                filteredFragments = list(filter(lambda x: x.id != oldFragmentId and x.id != newFragmentId, fragments))
+                # Log the fragments found, this is mostly for debugging
                 for fragment in fragments:
                     LOGGER.info(f"Found fragment: {fragment}")
-                fragments = [fragmentId]
+
+                filteredFragments.append(newFragmentId)
+
+                # Set the fragments to an array of just the fragmentId
+                conf["fragments"] = filteredFragments
+                LOGGER.debug(f"New configuration: {conf}")
                 try:
+                    # Update the robot part with the new configuration
                     await client.update_robot_part(part.id, part.name, conf)
                 except Exception as e:
                     LOGGER.error(f"Error updating robot part: {e}")
