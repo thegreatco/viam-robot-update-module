@@ -3,13 +3,15 @@ import datetime
 import json
 import os
 import ssl
-from typing import Any, ClassVar, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 from grpclib.client import Channel
 
 from typing_extensions import Self
 
 from viam.app.viam_client import ViamClient, AppClient
+from viam.app.app_client import RobotPart
 from viam.rpc.dial import AuthenticatedChannel, DialOptions, Credentials, _get_access_token
+from viam.robot.client import RobotClient
 from viam.components.generic import Generic
 from viam.logging import getLogger
 from viam.module.module import Module
@@ -21,25 +23,86 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
 LOGGER = getLogger(__name__)
-Namespace = "tennibot"
+Namespace = "myNamespace"
 
-def getCredentialsFromConfig() -> Tuple[str, str]:
+def conf_to_dict(conf: Mapping[str,Any]) -> Dict[str, Any]:
+    return dict(conf)
+   
+def get_machine_config() -> Mapping[str, Any]:
     filePath = os.getenv("VIAM_CONFIG_FILE")
     if filePath is None or filePath == "" or not os.path.exists(filePath):
-        filePath = "/etc/viam.json"
+        filePath = "/root/.viam/"
+        files = os.listdir(filePath)
+        matching_files = [file for file in files if file.startswith("cached_cloud_config_") and file.endswith(".json")]
+        if len(matching_files) == 0:
+            raise ValueError("no matching file found")
+        filePath = os.path.join('/root/.viam', matching_files[0])
     with open(filePath, 'r') as file:
         data = json.load(file)
         if "cloud" not in data:
-            raise ValueError("cloud not found in config file")
-        cloud = data["cloud"]
-        if "id" not in cloud or "secret" not in cloud:
-            raise ValueError("id or secret not found in cloud")
-        return cloud["id"], cloud["secret"]
+            raise ValueError("machine not found in config file")
+        return data
     
-async def getAppClientFromConfigCredentials(cloudId, cloudSecret) -> AppClient:
-    dial_options = DialOptions(disable_webrtc=True, credentials=Credentials(type="robot-secret", payload=cloudSecret), auth_entity=cloudId)
-    channel = await dial_app("app.viam.com", dial_options)
-    return AppClient(channel, {})
+def get_machine_part_id() -> str:
+    config = get_machine_config()
+    if "cloud" not in config or "id" not in config["cloud"]:
+        raise ValueError("machine or id not found in config file")
+    return config["cloud"]["id"]
+
+def get_machine_id() -> str:
+    config = get_machine_config()
+    if "cloud" not in config or "machine_id" not in config["cloud"]:
+        raise ValueError("machine or part_id not found in config file")
+    return config["cloud"]["machine_id"]
+
+def get_machine_fqdn() -> str:
+    config = get_machine_config()
+    if "cloud" not in config or "fqdn" not in config["cloud"]:
+        raise ValueError("fqdn not found in config file")
+    return config["cloud"]["fqdn"]
+
+def getCredentialsFromConfig() -> Tuple[str, str]:
+    config = get_machine_config()
+    if "auth" not in config:
+        raise ValueError("auth not found in config file")
+    auth = config["auth"]
+    if "handlers" not in auth:
+        raise ValueError("handlers not found in config file")
+    handlers = auth["handlers"]
+    if len(handlers) == 0:
+        raise ValueError("no handlers found in config file")
+    handler = [handler for handler in handlers if handler["type"] == "api-key"][0]
+    return handler["config"]["keys"][0], handler["config"][handler["config"]["keys"][0]]
+
+async def getAppClient(command: Mapping[str, ValueTypes]) -> Optional[AppClient]:
+    client: Optional[AppClient] = None
+    if "apiKeyName" not in command or "apiKey" not in command:
+        LOGGER.debug("no API key provided, trying to use machine credentials")
+        try:
+            cloudId, cloudSecret = getCredentialsFromConfig()
+            client = await getAppClientFromApiCredentials(cloudId, cloudSecret)
+        except Exception as e:
+            LOGGER.error(f"error getting client: {e}")
+    else:
+        LOGGER.debug("API key provided, using it")
+        client = await getAppClientFromApiCredentials(str(command["apiKeyName"]), str(command["apiKey"]))
+    
+    return client
+
+async def getRobotClient(command: Mapping[str, ValueTypes]) -> Optional[RobotClient]:
+    client: Optional[RobotClient] = None
+    if "apiKeyName" not in command or "apiKey" not in command:
+        LOGGER.debug("no API key provided, trying to use machine credentials")
+        try:
+            cloudId, cloudSecret = getCredentialsFromConfig()
+            client = await getRobotClientFromApiCredentials(cloudId, cloudSecret, get_machine_fqdn())
+        except Exception as e:
+            LOGGER.error(f"error getting client: {e}")
+    else:
+        LOGGER.debug("API key provided, using it")
+        client = await getRobotClientFromApiCredentials(str(command["apiKeyName"]), str(command["apiKey"]), get_machine_fqdn())
+    
+    return client
 
 async def dial_app(address: str, options: DialOptions) -> Channel:
     ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
@@ -54,20 +117,31 @@ async def dial_app(address: str, options: DialOptions) -> Channel:
 
     return channel
 
-async def getAppClientFromApiCredentials(apiKeyName, apiKey) -> AppClient:
+async def getAppClientFromApiCredentials(apiKeyName:str, apiKey:str) -> AppClient:
     dial_options = DialOptions.with_api_key(apiKey, apiKeyName)
     client = await ViamClient.create_from_dial_options(dial_options)
     return client.app_client
 
-def swap_fragment_id(oldFragmentId: str, newFragmentId: str, conf:Mapping[str, ValueTypes]) -> None:
+async def getRobotClientFromApiCredentials(apiKeyName:str, apiKey:str, address:str) -> RobotClient:
+    opts = RobotClient.Options.with_api_key(
+        api_key=apiKey,
+        api_key_id=apiKeyName
+    )
+    return await RobotClient.at_address(address, opts)
+
+def swap_fragment_id(oldFragmentId: str, newFragmentId: str, conf:Dict[str, Any]) -> None:
     # Get the fragments (or an empty array if fragments is not found)
     fragments = conf.get("fragments", [])
+
+    if not isinstance(fragments, list):
+        LOGGER.error(f"invalid fragments: {fragments}")
+        return
 
     # Filter out the old fragmentId, we also do the new fragmentId to prevent duplicates, just in case
     filteredFragments = list(filter(lambda x: x != oldFragmentId and x != newFragmentId, fragments))
     # Log the fragments found, this is mostly for debugging
     for fragment in fragments:
-        LOGGER.info(f"Found fragment: {fragment}")
+        LOGGER.info(f"found fragment: {fragment}")
 
     filteredFragments.append(newFragmentId)
 
@@ -79,7 +153,7 @@ def swap_fragment_id(oldFragmentId: str, newFragmentId: str, conf:Mapping[str, V
             mod["fragment_id"] = newFragmentId
 
 class UpdateModule(Generic):
-    MODEL: ClassVar[Model] = Model(ModelFamily(Namespace, "robot"), "update")
+    MODEL: ClassVar[Model] = Model(ModelFamily(Namespace, "machine"), "update")
 
     def __init__(self, name: str):
         super().__init__(name)
@@ -98,86 +172,106 @@ class UpdateModule(Generic):
         if "command" in command:
             cmd = command["command"]
             if cmd == "update":
-                LOGGER.info(f"Update command received: {command}")
+                LOGGER.info(f"update command received: {command}")
+                
                 newFragmentId = command.get("newFragmentId", "")
-                if newFragmentId == "":
-                    return {"error": "newFragmentId missing"}
+                if newFragmentId == "" or newFragmentId is None or not isinstance(newFragmentId, str):
+                    return {"error": "newFragmentId missing or invalid"}
                 oldFragmentId = command.get("oldFragmentId", "")
-                if oldFragmentId == "":
-                    return {"error": "oldFragmentId missing"}
-                robotId = command.get("robotId", "")
-                if robotId == "":
-                    return {"error": "robotId missing"}
-
-                client: AppClient = None
-                if "apiKeyName" not in command or "apiKey" not in command:
-                    LOGGER.debug("No API key provided, trying to use robot credentials")
-                    try:
-                        cloudId, cloudSecret = getCredentialsFromConfig()
-                        client = await getAppClientFromConfigCredentials(cloudId, cloudSecret)
-                    except Exception as e:
-                        LOGGER.error(f"Error getting client: {e}")
-                else:
-                    LOGGER.debug("API key provided, using it")
-                    client = await getAppClientFromApiCredentials(command["apiKeyName"], command["apiKey"])
-                
-                if client is None:
+                if oldFragmentId == "" or oldFragmentId is None or not isinstance(oldFragmentId, str):
+                    return {"error": "oldFragmentId missing or invalid"}
+                app_client = await getAppClient(command)                
+                if app_client is None:
                     return {"error": "credentials not found"}
-                LOGGER.debug(f"Client created, updating configuration for robot {robotId} with fragment {newFragmentId}")
-                await self.updateFragment(client, robotId, oldFragmentId, newFragmentId)
+                machineId = get_machine_id()
+                LOGGER.debug(f"client created, updating configuration for machine {machineId} with fragment {newFragmentId}")
+                await self.updateFragment(app_client, machineId, oldFragmentId, newFragmentId)
                 
-                if client is not None and client._channel is not None:
-                    client._channel.close()
+                if app_client is not None and app_client._channel is not None:
+                    app_client._channel.close()
                 return {"ok": 1}
+            elif cmd == "restart":
+                LOGGER.info("restart requested")
+                app_client = await getAppClient(command)
+                if app_client is None:
+                    return {"error": "credentials not found"}
+                machine_part_id = get_machine_part_id()
+                await app_client.mark_part_for_restart(machine_part_id)
+                LOGGER.info("sent restart request")
+                return {"ok": 1}
+            elif cmd == "restart_on_rdk_update":
+                LOGGER.info("restart on update requested")
+                version = command.get("version", "")
+                if version == "" :
+                    return {"error": "no version provided"}
+                
+                app_client = await getAppClient(command)
+                if app_client is None:
+                    return {"error": "credentials not found"}
+                machine_part_id = get_machine_part_id()
+                robot_client = await getRobotClient(command)
+                if robot_client is None:
+                    return {"error": "credentials not found"}
+                status = await robot_client.get_machine_status()
+                await app_client.mark_part_for_restart(machine_part_id)
+                LOGGER.info("sent restart on update request")
+                return {"ok": 1}
+                
         return {"error": "no command provided"}
     
-    async def updateFragment(self, client: AppClient, robotId: str, oldFragmentId: str, newFragmentId: str) -> Mapping[str, ValueTypes]:
+    async def updateFragment(self, client: AppClient, machineId: str, oldFragmentId: str, newFragmentId: str) -> Mapping[str, ValueTypes]:
         try:
-            robot = await client.get_robot(robotId)
-            if robot is None:
-                return {"error": "Robot not found"}
-            if robot.last_access is None or robot.last_access.ToDatetime() < datetime.datetime.now() - datetime.timedelta(minutes=1):
-                return {"error": "Robot not accessed in the last 60 seconds"}
-            LOGGER.debug(f"Robot found: {robot}")
+            machine = await client.get_robot(machineId)
+            if machine is None:
+                return {"error": "machine not found"}
+            if machine.last_access is None or machine.last_access.ToDatetime() < datetime.datetime.now() - datetime.timedelta(minutes=1):
+                return {"error": "machine not accessed in the last 60 seconds"}
+            LOGGER.debug(f"machine found: {machine}")
 
             try:
-                parts = await client.get_robot_parts(robotId)
-                if parts is None or len(parts) == 0:
-                    return {"error": "No parts found for robot"}
-                if len(parts) > 1:
-                    return {"error": f"More than one part found for robot: {robotId}"}
-                
-                # Get the first part
-                part = parts[0]
+                part = await self.get_machine_part(client, machineId)
 
-                LOGGER.debug(f"Robot part found: {part}")
+                LOGGER.debug(f"machine part found: {part}")
 
-                # Get the robot configuration
+                # Get the machine configuration
                 conf = part.robot_config
 
+                if conf is None:
+                    return {"error": "no configuration found for machine part"}
+
                 # Swap the fragmentId
-                swap_fragment_id(oldFragmentId, newFragmentId, conf)
+                swap_fragment_id(oldFragmentId, newFragmentId, conf_to_dict(conf))
                 
-                LOGGER.debug(f"New configuration: {conf}")
+                LOGGER.debug(f"new configuration: {conf}")
                 try:
-                    # Update the robot part with the new configuration
+                    # Update the machine part with the new configuration
                     await client.update_robot_part(part.id, part.name, conf)
                 except Exception as e:
-                    LOGGER.error(f"Error updating robot part: {e}")
-                    return {"error": f"Error updating robot part: {e}"}
+                    LOGGER.error(f"error updating machine part: {e}")
+                    return {"error": f"error updating machine part: {e}"}
                 return {"ok": 1}
             except Exception as e:
-                LOGGER.error(f"Error getting robot parts: {e}")
-                return {"error": f"Error getting robot parts: {e}"}
+                LOGGER.error(f"error getting machine parts: {e}")
+                return {"error": f"error getting machine parts: {e}"}
         except Exception as e:
-            LOGGER.error(f"Error getting robot: {e}")
-            return {"error": f"Error getting robot: {e}"}
+            LOGGER.error(f"error getting machine: {e}")
+            return {"error": f"error getting machine: {e}"}
 
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
         pass
 
     async def close(self):
         LOGGER.info(f"{self.name} is closed.")
+
+    async def get_machine_part(self, client: AppClient, machineId: str) -> RobotPart:
+        parts = await client.get_robot_parts(machineId)
+        if parts is None or len(parts) == 0:
+            raise Exception("no parts found for machine")
+        if len(parts) > 1:
+            raise Exception("more than one part found for machine")
+        
+        # Get the first part
+        return parts[0]
 
 async def main():
     """This function creates and starts a new module, after adding all desired resource models.
@@ -188,7 +282,6 @@ async def main():
     module = Module.from_args()
     module.add_model_from_registry(Generic.SUBTYPE, UpdateModule.MODEL)
     await module.start()
-
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -2,9 +2,7 @@ package update_module
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"os"
 	"time"
 
 	"go.uber.org/zap"
@@ -16,16 +14,21 @@ import (
 	"go.viam.com/utils/rpc"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"tennibot-robot-update-module/utils"
+	"viam-robot-update-module/utils"
+
+	api "github.com/thegreatco/viamutils/api"
+	configutils "github.com/thegreatco/viamutils/config"
 )
 
-var Model = resource.NewModel(utils.Namespace, "robot", "update")
-var errCredentialsNotFound = errors.New("credentials not found")
-var errOldFragmentIdMissing = errors.New("oldFragmentId missing")
-var errNewFragmentIdMissing = errors.New("newFragmentId missing")
-var errRobotIdMissing = errors.New("robotId missing")
-var errNoCommandProvided = errors.New("no command provided")
-var errRobotNotOnline = errors.New("robot not online")
+var (
+	Model                   = resource.NewModel(utils.Namespace, "robot", "update")
+	errOldFragmentIdMissing = errors.New("oldFragmentId missing")
+	errNewFragmentIdMissing = errors.New("newFragmentId missing")
+	errRobotIdMissing       = errors.New("robotId missing")
+	errNoCommandProvided    = errors.New("no command provided")
+	errRobotNotOnline       = errors.New("robot not online")
+	errCredentialsNotFound  = errors.New("credentials not found")
+)
 
 func init() {
 	resource.RegisterComponent(
@@ -84,11 +87,7 @@ func (b *RobotUpdateModule) DoCommand(ctx context.Context, cmd map[string]interf
 				if !ok || oldFragmentId == "" {
 					return map[string]interface{}{"error": "No oldFragmentId provided"}, errOldFragmentIdMissing
 				}
-
-				robotId, ok := cmd["robotId"].(string)
-				if !ok || robotId == "" {
-					return map[string]interface{}{"error": "No robotId provided"}, errRobotIdMissing
-				}
+				// TODO: make this match the python module
 				apiKeyName, apiKey, err := getApiCredentialsFromRequest(cmd)
 				if err != nil {
 					b.logger.Errorf("Error getting api credentials: %v", err)
@@ -99,7 +98,11 @@ func (b *RobotUpdateModule) DoCommand(ctx context.Context, cmd map[string]interf
 					b.logger.Errorf("Error getting client: %v", err)
 					return map[string]interface{}{"error": err}, err
 				}
-				return b.updateFragment(ctx, client, robotId, oldFragmentId, newFragmentId)
+				machineId, err := configutils.GetMachineId()
+				if err != nil {
+					return map[string]interface{}{"error": err}, err
+				}
+				return b.updateFragment(ctx, client, machineId, oldFragmentId, newFragmentId)
 			} else {
 				return map[string]interface{}{"error": "No fragmentId provided"}, errNewFragmentIdMissing
 			}
@@ -111,11 +114,11 @@ func (b *RobotUpdateModule) DoCommand(ctx context.Context, cmd map[string]interf
 func (b *RobotUpdateModule) GetClient(ctx context.Context, apiKeyName, apiKey string) (app_proto.AppServiceClient, error) {
 	// If no apiKeyName is provided, use the robot's API key
 	if apiKeyName == "" || apiKey == "" {
-		cloudId, cloudSecret, err := getCredentialsFromConfig()
+		apiKeyName, apiKey, err := configutils.GetCredentialsFromConfig()
 		if err != nil {
 			return nil, err
 		}
-		client, err := getAppClientFromConfigCredentials(ctx, b.logger.AsZap(), cloudId, cloudSecret)
+		client, err := api.NewAppClientFromApiCredentials(ctx, b.logger, apiKeyName, apiKey)
 		return client, err
 	} else {
 		client, err := getAppClientFromApiCredentials(ctx, b.logger.AsZap(), apiKeyName, apiKey)
@@ -213,6 +216,16 @@ func getAppClientFromConfigCredentials(ctx context.Context, logger *zap.SugaredL
 	return app_proto.NewAppServiceClient(conn), nil
 }
 
+func getApiCredentialsFromRequest(cmd map[string]interface{}) (apiKeyName string, apiKey string, err error) {
+	// First try to get the credentials from the command
+	apiKeyName, apiKeyNameOk := cmd["apiKeyName"].(string)
+	apiKey, apiKeyOk := cmd["apiKey"].(string)
+	if apiKeyOk && apiKeyNameOk {
+		return apiKeyName, apiKey, nil
+	}
+	return "", "", errCredentialsNotFound
+}
+
 // swapFragmentId swaps the old fragmentId with the new fragmentId in the robot configuration
 // This modifies the configuration in place
 func swapFragmentId(oldFragmentId, newFragmentId string, conf *structpb.Struct, logger logging.Logger) error {
@@ -253,47 +266,4 @@ func swapFragmentId(oldFragmentId, newFragmentId string, conf *structpb.Struct, 
 	}
 	conf.Fields["fragments"] = &structpb.Value{Kind: &structpb.Value_ListValue{ListValue: value}}
 	return nil
-}
-
-func getApiCredentialsFromRequest(cmd map[string]interface{}) (apiKeyName string, apiKey string, err error) {
-	// First try to get the credentials from the command
-	apiKeyName, apiKeyNameOk := cmd["apiKeyName"].(string)
-	apiKey, apiKeyOk := cmd["apiKey"].(string)
-	if apiKeyOk && apiKeyNameOk {
-		return apiKeyName, apiKey, nil
-	}
-	return "", "", errCredentialsNotFound
-}
-
-func getCredentialsFromConfig() (cloudId string, cloudSecret string, err error) {
-	var filePath string
-	overridePath := os.Getenv("VIAM_CONFIG_FILE")
-	if overridePath != "" {
-		filePath = overridePath
-	} else {
-		filePath = "/etc/viam.json"
-	}
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return "", "", err
-	}
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", "", err
-	}
-	var config ViamConfig
-	err = json.Unmarshal(data, &config)
-	if err != nil {
-		return "", "", err
-	}
-	return config.Cloud.ID, config.Cloud.Secret, nil
-}
-
-type ViamCloudConfig struct {
-	AppAddress string `json:"app_address"`
-	ID         string `json:"id"`
-	Secret     string `json:"secret"`
-}
-
-type ViamConfig struct {
-	Cloud ViamCloudConfig `json:"cloud"`
 }

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	configutils "github.com/thegreatco/viamutils/config"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	app_proto "go.viam.com/api/app/v1"
@@ -109,13 +111,13 @@ func TestUpdateFragment(t *testing.T) {
 }
 
 func TestGetApiKeyFromConfig(t *testing.T) {
-	cloudId, cloudSecret, err := getCredentialsFromConfig()
+	cloudId, cloudSecret, err := configutils.GetCredentialsFromConfig()
 	assert.Error(t, err, os.ErrNotExist)
 	assert.Equal(t, "", cloudId)
 	assert.Equal(t, "", cloudSecret)
 
 	os.Setenv("VIAM_CONFIG_FILE", "testdata/viam.json")
-	cloudId, cloudSecret, err = getCredentialsFromConfig()
+	cloudId, cloudSecret, err = configutils.GetCredentialsFromConfig()
 	assert.NoError(t, err)
 	assert.Equal(t, "cloud_id", cloudId)
 	assert.Equal(t, "cloud_secret", cloudSecret)
@@ -491,5 +493,21 @@ func (m *MockAppServiceClient) UpdateRobot(ctx context.Context, in *app_proto.Up
 
 // UploadModuleFile implements v1.AppServiceClient.
 func (m *MockAppServiceClient) UploadModuleFile(ctx context.Context, opts ...grpc.CallOption) (app_proto.AppService_UploadModuleFileClient, error) {
+	panic("unimplemented")
+}
+
+func (m *MockAppServiceClient) GetFragmentHistory(ctx context.Context, in *app_proto.GetFragmentHistoryRequest, opts ...grpc.CallOption) (*app_proto.GetFragmentHistoryResponse, error) {
+	panic("unimplemented")
+}
+
+func (m *MockAppServiceClient) ListMachineFragments(ctx context.Context, in *app_proto.ListMachineFragmentsRequest, opts ...grpc.CallOption) (*app_proto.ListMachineFragmentsResponse, error) {
+	panic("unimplemented")
+}
+
+func (m *MockAppServiceClient) RenameKey(ctx context.Context, in *app_proto.RenameKeyRequest, opts ...grpc.CallOption) (*app_proto.RenameKeyResponse, error) {
+	panic("unimplemented")
+}
+
+func (m *MockAppServiceClient) TransferRegistryItem(ctx context.Context, in *app_proto.TransferRegistryItemRequest, opts ...grpc.CallOption) (*app_proto.TransferRegistryItemResponse, error) {
 	panic("unimplemented")
 }
