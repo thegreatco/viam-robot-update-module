@@ -95,18 +95,11 @@ def is_version(version: str) -> bool:
             return False
         else:
             return True
-    raise ValueError("rdk is not symlinked")
+    raise ValueError("viam-server is not symlinked")
 
 def restart_viam_server() -> None:
     LOGGER.info("restarting viam-server")
     os.system("systemctl restart viam-agent")
-    # for proc in psutil.process_iter():
-    #     try:
-    #         if proc.name() == "viam-server":
-    #             LOGGER.info(f"found viam-server process {proc.pid}, killing")
-    #             proc.send_signal(signal.SIGTERM)
-    #     except psutil.NoSuchProcess:
-    #         pass
 
 async def getAppClient(command: Mapping[str, ValueTypes]) -> Optional[AppClient]:
     client: Optional[AppClient] = None
@@ -225,20 +218,20 @@ class UpdateModule(Generic):
                     app_client._channel.close()
                 return {"ok": 1}
             elif cmd == "restart":
-                LOGGER.info("restart requested")
+                LOGGER.info("receive restart request")
                 restart_viam_server()
                 # these next lines will likely never get hit as the module process wil get killed by the restart
                 LOGGER.info("sent restart request")
                 return {"ok": 1}
             elif cmd == "restart_on_rdk_update":
-                LOGGER.info("restart on update requested")
+                LOGGER.info("received restart_on_rdk_update request")
                 version = command.get("version", "")
                 if version == "" :
                     return {"error": "no version provided"}
                 
                 robot_client = await getRobotClient(command)
                 if robot_client is None:
-                    return {"error": "credentials not found"}
+                    return {"error": "no robot client"}
                 try:
                     running_version = await robot_client.get_version()
                     if running_version is None:

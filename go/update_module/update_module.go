@@ -3,14 +3,16 @@ package update_module
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
-	"go.uber.org/zap"
 	app_proto "go.viam.com/api/app/v1"
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
-	rutils "go.viam.com/rdk/utils"
+	"go.viam.com/rdk/robot/client"
 	"go.viam.com/utils/rpc"
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -87,7 +89,6 @@ func (b *RobotUpdateModule) DoCommand(ctx context.Context, cmd map[string]interf
 				if !ok || oldFragmentId == "" {
 					return map[string]interface{}{"error": "No oldFragmentId provided"}, errOldFragmentIdMissing
 				}
-				// TODO: make this match the python module
 				apiKeyName, apiKey, err := getApiCredentialsFromRequest(cmd)
 				if err != nil {
 					b.logger.Errorf("Error getting api credentials: %v", err)
@@ -106,24 +107,104 @@ func (b *RobotUpdateModule) DoCommand(ctx context.Context, cmd map[string]interf
 			} else {
 				return map[string]interface{}{"error": "No fragmentId provided"}, errNewFragmentIdMissing
 			}
+		case "restart":
+			b.logger.Info("received restart request")
+			restartViamServer()
+			b.logger.Info("sent restart request")
+			return map[string]interface{}{"ok": 1}, nil
+		case "restart_on_rdk_update":
+			b.logger.Info("received restart_on_rdk_update request")
+			desiredVersion := cmd["version"].(string)
+			if desiredVersion == "" {
+				return map[string]interface{}{"error": "no version provided"}, nil
+			}
+			apiKeyName, apiKey, err := getApiCredentialsFromRequest(cmd)
+			if err != nil {
+				b.logger.Errorf("Error getting api credentials: %v", err)
+				return map[string]interface{}{"error": err}, err
+			}
+			robotClient, err := b.getRobotClient(ctx, apiKeyName, apiKey)
+			if err != nil {
+				b.logger.Errorf("Error getting robot client: %v", err)
+				return map[string]interface{}{"error": "no robot client"}, nil
+			}
+			defer robotClient.Close(ctx)
+			runningVersion, err := robotClient.Version(ctx)
+			if err != nil {
+				b.logger.Errorf("Error getting robot version: %v", err)
+				return map[string]interface{}{"error": "no robot version"}, nil
+			}
+			if strings.Contains(runningVersion.Version, desiredVersion) {
+				b.logger.Infof("Robot is already running version %s", desiredVersion)
+				return map[string]interface{}{"ok": 1, "msg": "viam-server is already on desired version"}, nil
+			}
+
+			if v, err := isSymLink("/opt/viam/bin/viam-server"); err == nil && v {
+				retryCount := 0
+				for {
+					if retryCount > 6 {
+						b.logger.Errorf("viam-server not updated after 30 seconds")
+						return map[string]interface{}{"error": "viam-server not updated after 30 seconds"}, err
+					}
+					if y, err := isVersion(desiredVersion); err == nil && y {
+						break
+					}
+					time.Sleep(5 * time.Second)
+					retryCount++
+				}
+				restartViamServer()
+				b.logger.Infof("viam-server updated and restarted")
+				return map[string]interface{}{"ok": 1, "msg": "viam-server updated and restarted"}, nil
+			} else if err != nil {
+				b.logger.Errorf("Error checking if /opt/viam/bin/viam-server is a symlink: %v", err)
+				return map[string]interface{}{"error": "Error checking if /opt/viam/bin/viam-server is a symlink"}, err
+			} else {
+				b.logger.Infof("/opt/viam/bin/viam-server is not a symlink")
+				return map[string]interface{}{"error": "/opt/viam/bin/viam-server is not a symlink"}, err
+			}
 		}
 	}
 	return map[string]interface{}{"error": "No command provided"}, errNoCommandProvided
 }
 
 func (b *RobotUpdateModule) GetClient(ctx context.Context, apiKeyName, apiKey string) (app_proto.AppServiceClient, error) {
-	// If no apiKeyName is provided, use the robot's API key
-	if apiKeyName == "" || apiKey == "" {
-		apiKeyName, apiKey, err := configutils.GetCredentialsFromConfig()
-		if err != nil {
-			return nil, err
-		}
-		client, err := api.NewAppClientFromApiCredentials(ctx, b.logger, apiKeyName, apiKey)
-		return client, err
-	} else {
-		client, err := getAppClientFromApiCredentials(ctx, b.logger.AsZap(), apiKeyName, apiKey)
-		return client, err
+	akn, ak, err := configutils.GetCredentialsFromConfig()
+	if err != nil {
+		return nil, err
 	}
+	if apiKeyName != "" && apiKey != "" {
+		akn = apiKeyName
+		ak = apiKey
+	}
+	client, err := api.NewAppClientFromApiCredentials(ctx, b.logger, akn, ak)
+	return client, err
+}
+
+func (b *RobotUpdateModule) getRobotClient(ctx context.Context, apiKeyName, apiKey string) (*client.RobotClient, error) {
+	akn, ak, err := configutils.GetCredentialsFromConfig()
+	if err != nil {
+		return nil, err
+	}
+	if apiKeyName != "" && apiKey != "" {
+		akn = apiKeyName
+		ak = apiKey
+	}
+	config, err := configutils.GetMachineConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	return client.New(
+		context.Background(),
+		config.Cloud.FQDN,
+		b.logger,
+		client.WithDialOptions(rpc.WithEntityCredentials(
+			akn,
+			rpc.Credentials{
+				Type:    rpc.CredentialsTypeAPIKey,
+				Payload: ak,
+			})),
+	)
 }
 
 func (b *RobotUpdateModule) updateFragment(ctx context.Context, client app_proto.AppServiceClient, robotId, oldFragmentId, newFragmentId string) (map[string]interface{}, error) {
@@ -178,44 +259,6 @@ func (b *RobotUpdateModule) updateFragment(ctx context.Context, client app_proto
 	return map[string]interface{}{"ok": 1}, nil
 }
 
-func getAppClientFromApiCredentials(ctx context.Context, logger *zap.SugaredLogger, apiKeyName string, apiKey string) (app_proto.AppServiceClient, error) {
-	conn, err := rpc.DialDirectGRPC(
-		ctx,
-		"app.viam.com:443",
-		logger,
-		rpc.WithEntityCredentials(
-			apiKeyName,
-			rpc.Credentials{
-				Type:    rpc.CredentialsTypeAPIKey,
-				Payload: apiKey,
-			}),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return app_proto.NewAppServiceClient(conn), nil
-}
-
-func getAppClientFromConfigCredentials(ctx context.Context, logger *zap.SugaredLogger, cloudId, cloudSecret string) (app_proto.AppServiceClient, error) {
-	conn, err := rpc.DialDirectGRPC(
-		ctx,
-		"app.viam.com:443",
-		logger,
-		rpc.WithEntityCredentials(
-			cloudId,
-			rpc.Credentials{
-				Type:    rutils.CredentialsTypeRobotSecret,
-				Payload: cloudSecret,
-			}),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return app_proto.NewAppServiceClient(conn), nil
-}
-
 func getApiCredentialsFromRequest(cmd map[string]interface{}) (apiKeyName string, apiKey string, err error) {
 	// First try to get the credentials from the command
 	apiKeyName, apiKeyNameOk := cmd["apiKeyName"].(string)
@@ -266,4 +309,44 @@ func swapFragmentId(oldFragmentId, newFragmentId string, conf *structpb.Struct, 
 	}
 	conf.Fields["fragments"] = &structpb.Value{Kind: &structpb.Value_ListValue{ListValue: value}}
 	return nil
+}
+
+func restartViamServer() error {
+	cmd := exec.Command("systemctl", "restart", "viam-agent")
+	err := cmd.Run()
+	return err
+}
+
+func isVersion(version string) (bool, error) {
+	fi, err := os.Lstat("/opt/viam/bin/viam-server")
+	if err != nil {
+		return false, err
+	}
+
+	if fi.Mode()&os.ModeSymlink != 0 {
+		link, err := os.Readlink("/opt/viam/bin/viam-server")
+		if err != nil {
+			return false, err
+		}
+
+		if strings.Contains(link, version) {
+			return true, nil
+		}
+	} else {
+		return false, errors.New("viam-server is not a symlink")
+	}
+
+	return false, nil
+}
+
+func isSymLink(path string) (bool, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return true, nil
+	}
+	return false, nil
 }

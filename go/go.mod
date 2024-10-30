@@ -6,8 +6,7 @@ toolchain go1.23.2
 
 require (
 	github.com/stretchr/testify v1.9.0
-	github.com/thegreatco/viamutils v0.0.0-20241025202727-d9f98a2373e1
-	go.uber.org/zap v1.27.0
+	github.com/thegreatco/viamutils v0.0.1
 	go.viam.com/api v0.1.351
 	go.viam.com/rdk v0.47.2
 	go.viam.com/utils v0.1.108
@@ -124,6 +123,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.29.0 // indirect
 	go.uber.org/goleak v1.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.27.0 // indirect
 	go.viam.com/test v1.1.1-0.20220913152726-5da9916c08a2 // indirect
 	golang.org/x/crypto v0.28.0 // indirect
 	golang.org/x/exp v0.0.0-20240904232852-e7e105dedf7e // indirect
