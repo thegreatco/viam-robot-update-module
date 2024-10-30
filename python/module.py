@@ -3,6 +3,8 @@ import datetime
 import json
 import os
 import ssl
+import psutil
+import signal
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 from grpclib.client import Channel
 
@@ -31,12 +33,22 @@ def conf_to_dict(conf: Mapping[str,Any]) -> Dict[str, Any]:
 def get_machine_config() -> Mapping[str, Any]:
     filePath = os.getenv("VIAM_CONFIG_FILE")
     if filePath is None or filePath == "" or not os.path.exists(filePath):
-        filePath = "/root/.viam/"
-        files = os.listdir(filePath)
-        matching_files = [file for file in files if file.startswith("cached_cloud_config_") and file.endswith(".json")]
-        if len(matching_files) == 0:
-            raise ValueError("no matching file found")
-        filePath = os.path.join('/root/.viam', matching_files[0])
+        etcViamJson = "/etc/viam.json"
+        if not os.path.exists(etcViamJson):
+            raise ValueError("no config file found")
+        
+        with open(etcViamJson, 'r') as file:
+            data = json.load(file)
+            if "cloud" not in data:
+                raise ValueError("error reading /etc/viam.json file")
+            id = data["cloud"]["id"]
+            if id is None or id == "":
+                raise ValueError("error reading /etc/viam.json file")
+            filePath = f"/root/.viam/cached_cloud_config_{id}.json"
+        if filePath is None:
+            raise ValueError("error reading /etc/viam.json file")
+        if not os.path.exists(filePath):
+            raise ValueError("no config file found")
     with open(filePath, 'r') as file:
         data = json.load(file)
         if "cloud" not in data:
@@ -59,7 +71,9 @@ def get_machine_fqdn() -> str:
     config = get_machine_config()
     if "cloud" not in config or "fqdn" not in config["cloud"]:
         raise ValueError("fqdn not found in config file")
-    return config["cloud"]["fqdn"]
+    fqdn = config["cloud"]["fqdn"]
+    LOGGER.info(f"fqdn: {fqdn}")
+    return fqdn
 
 def getCredentialsFromConfig() -> Tuple[str, str]:
     config = get_machine_config()
@@ -73,6 +87,26 @@ def getCredentialsFromConfig() -> Tuple[str, str]:
         raise ValueError("no handlers found in config file")
     handler = [handler for handler in handlers if handler["type"] == "api-key"][0]
     return handler["config"]["keys"][0], handler["config"][handler["config"]["keys"][0]]
+
+def is_version(version: str) -> bool:
+    if os.path.islink("/opt/viam/bin/viam-server"):
+        link = os.readlink("/opt/viam/bin/viam-server")
+        if link.find(version) == -1:
+            return False
+        else:
+            return True
+    raise ValueError("rdk is not symlinked")
+
+def restart_viam_server() -> None:
+    LOGGER.info("restarting viam-server")
+    os.system("systemctl restart viam-agent")
+    # for proc in psutil.process_iter():
+    #     try:
+    #         if proc.name() == "viam-server":
+    #             LOGGER.info(f"found viam-server process {proc.pid}, killing")
+    #             proc.send_signal(signal.SIGTERM)
+    #     except psutil.NoSuchProcess:
+    #         pass
 
 async def getAppClient(command: Mapping[str, ValueTypes]) -> Optional[AppClient]:
     client: Optional[AppClient] = None
@@ -192,11 +226,8 @@ class UpdateModule(Generic):
                 return {"ok": 1}
             elif cmd == "restart":
                 LOGGER.info("restart requested")
-                app_client = await getAppClient(command)
-                if app_client is None:
-                    return {"error": "credentials not found"}
-                machine_part_id = get_machine_part_id()
-                await app_client.mark_part_for_restart(machine_part_id)
+                restart_viam_server()
+                # these next lines will likely never get hit as the module process wil get killed by the restart
                 LOGGER.info("sent restart request")
                 return {"ok": 1}
             elif cmd == "restart_on_rdk_update":
@@ -205,17 +236,32 @@ class UpdateModule(Generic):
                 if version == "" :
                     return {"error": "no version provided"}
                 
-                app_client = await getAppClient(command)
-                if app_client is None:
-                    return {"error": "credentials not found"}
-                machine_part_id = get_machine_part_id()
                 robot_client = await getRobotClient(command)
                 if robot_client is None:
                     return {"error": "credentials not found"}
-                status = await robot_client.get_machine_status()
-                await app_client.mark_part_for_restart(machine_part_id)
-                LOGGER.info("sent restart on update request")
-                return {"ok": 1}
+                try:
+                    running_version = await robot_client.get_version()
+                    if running_version is None:
+                        return {"error": "error getting version"}
+                    if str(version) in running_version.version:
+                        return {"ok": 1, "msg": "viam-server is already on desired version"}
+
+                    if os.path.islink("/opt/viam/bin/viam-server"):
+                        retry_count = 0
+                        while not is_version(str(version)):
+                            LOGGER.info("viam-server version not updated, waiting 5 seconds")
+                            if retry_count > 6:
+                                return {"error": "viam-server not updated after 30 seconds"}
+                            await asyncio.sleep(5)
+                            retry_count += 1
+                    else:
+                        return {"error": "not viam-server is not symlinked, are you sure this is managed by viam-agent?"}
+                    restart_viam_server()
+                    # these next lines will likely never get hit as the module process wil get killed by the restart
+                    LOGGER.info("sent restart on update request")
+                    return {"ok": 1}
+                finally:
+                    await robot_client.close()
                 
         return {"error": "no command provided"}
     
@@ -285,3 +331,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+
+
+
