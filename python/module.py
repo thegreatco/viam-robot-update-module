@@ -7,6 +7,7 @@ import psutil
 import signal
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 from grpclib.client import Channel
+from grpclib import exceptions, Status
 
 from typing_extensions import Self
 
@@ -25,7 +26,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
 LOGGER = getLogger(__name__)
-Namespace = "myNamespace"
+Namespace = "pete"
 
 def conf_to_dict(conf: Mapping[str,Any]) -> Dict[str, Any]:
     return dict(conf)
@@ -187,6 +188,7 @@ class UpdateModule(Generic):
 
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
+        LOGGER.info(f"Starting v0.0.6")
         sensor = cls(config.name)
         sensor.reconfigure(config, dependencies)
         return sensor
@@ -233,11 +235,17 @@ class UpdateModule(Generic):
                 if robot_client is None:
                     return {"error": "no robot client"}
                 try:
-                    running_version = await robot_client.get_version()
-                    if running_version is None:
-                        return {"error": "error getting version"}
-                    if str(version) in running_version.version:
-                        return {"ok": 1, "msg": "viam-server is already on desired version"}
+                    try:
+                        running_version = await robot_client.get_version()
+                        if running_version is None:
+                            return {"error": "error getting version"}
+                        if str(version) in running_version.version:
+                            return {"ok": 1, "msg": "viam-server is already on desired version"}
+                    except exceptions.GRPCError as e:
+                        if e.status == Status.UNIMPLEMENTED:
+                            pass
+                        else:
+                            return {"ok": 0, "error": f"error getting version: {e}"}
 
                     if os.path.islink("/opt/viam/bin/viam-server"):
                         retry_count = 0
@@ -253,6 +261,8 @@ class UpdateModule(Generic):
                     # these next lines will likely never get hit as the module process wil get killed by the restart
                     LOGGER.info("sent restart on update request")
                     return {"ok": 1}
+                except Exception as e:
+                    return {"error": f"error getting version: {e}"}
                 finally:
                     await robot_client.close()
                 

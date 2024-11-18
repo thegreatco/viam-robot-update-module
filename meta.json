@@ -1,0 +1,15 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "pete:robot-update-module",
+  "visibility": "private",
+  "url": "https://github.com/thegreatco/viam-robot-update-module",
+  "description": "A module to let the robot update itself. this is a demo module",
+  "models": [
+    {
+      "api": "rdk:component:generic",
+      "model": "pete:machine:update"
+    }
+  ],
+  "entrypoint": "dist/run.sh",
+  "first_run": "dist/init.sh"
+}
