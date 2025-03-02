@@ -4,3 +4,6 @@ python/dist
 .vscode
 **/.vscode
 **/__pycache__
+
+module.spec
+viam-config-update-module.tgz
