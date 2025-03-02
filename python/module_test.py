@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import unittest
 import json
 import os
-from python.module import UpdateModule, swap_fragment_id
+from module import UpdateModule, swap_fragment_id
 
 from unittest.mock import AsyncMock, create_autospec
 from viam.utils import ValueTypes

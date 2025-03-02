@@ -10,6 +10,11 @@
       "model": "pete:machine:update"
     }
   ],
-  "entrypoint": "dist/run.sh",
-  "first_run": "dist/init.sh"
+  "build":{
+    "build": "make build",
+    "path": "viam-update-module.tar.gz",
+    "arch": ["linux/arm64"]
+  },
+  "entrypoint": "run.sh",
+  "first_run": "init.sh"
 }

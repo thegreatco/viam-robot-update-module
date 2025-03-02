@@ -25,6 +25,7 @@ from viam.resource.registry import Registry, ResourceCreatorRegistration
 from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
+VERSION = "0.0.9"
 LOGGER = getLogger(__name__)
 Namespace = "pete"
 
@@ -157,7 +158,8 @@ async def getRobotClientFromApiCredentials(apiKeyName:str, apiKey:str, address:s
     )
     return await RobotClient.at_address(address, opts)
 
-def swap_fragment_id(oldFragmentId: str, newFragmentId: str, conf:Dict[str, Any]) -> None:
+def swap_fragment_id(oldFragmentId: str, newFragmentId: str, conf:Mapping[str, Any]):
+    LOGGER.info(f"swapping fragmentId {oldFragmentId} with {newFragmentId}")
     # Get the fragments (or an empty array if fragments is not found)
     fragments = conf.get("fragments", [])
 
@@ -165,19 +167,18 @@ def swap_fragment_id(oldFragmentId: str, newFragmentId: str, conf:Dict[str, Any]
         LOGGER.error(f"invalid fragments: {fragments}")
         return
 
-    # Filter out the old fragmentId, we also do the new fragmentId to prevent duplicates, just in case
-    filteredFragments = list(filter(lambda x: x != oldFragmentId and x != newFragmentId, fragments))
     # Log the fragments found, this is mostly for debugging
     for fragment in fragments:
         LOGGER.info(f"found fragment: {fragment}")
 
-    filteredFragments.append(newFragmentId)
-
-    # Set the fragments to an array of just the fragmentId
-    conf["fragments"] = filteredFragments
+    # Remove the oldFragmentId
+    fragments.remove(oldFragmentId)
+    # Append the newFragmentId
+    fragments.append(newFragmentId)
 
     for mod in conf.get("fragment_mods", []):
         if mod.get("fragment_id", "") == oldFragmentId:
+            LOGGER.info(f"swapping {mod['fragment_id']} for {newFragmentId} in: {mod}")
             mod["fragment_id"] = newFragmentId
 
 class UpdateModule(Generic):
@@ -188,7 +189,7 @@ class UpdateModule(Generic):
 
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
-        LOGGER.info(f"Starting v0.0.6")
+        LOGGER.info(f"Starting {VERSION}")
         sensor = cls(config.name)
         sensor.reconfigure(config, dependencies)
         return sensor
@@ -289,9 +290,9 @@ class UpdateModule(Generic):
                     return {"error": "no configuration found for machine part"}
 
                 # Swap the fragmentId
-                swap_fragment_id(oldFragmentId, newFragmentId, conf_to_dict(conf))
+                swap_fragment_id(oldFragmentId, newFragmentId, conf)
                 
-                LOGGER.debug(f"new configuration: {conf}")
+                LOGGER.info(f"new configuration: {conf}")
                 try:
                     # Update the machine part with the new configuration
                     await client.update_robot_part(part.id, part.name, conf)
