@@ -41,5 +41,9 @@ upload:
 		echo "There are unstaged changes in tracked files. Please commit or stash them."; \
 		exit 1; \
 	fi
+	@if [ "$$(git rev-parse HEAD)" != "$$(git rev-parse v$(GIT_VERSION))" ]; then \
+		echo "HEAD is not the commit corresponding to the latest tag (v$(GIT_VERSION))."; \
+		exit 1; \
+	fi
 	viam module update
 	viam module upload --version=${VERSION} --platform=${PLATFORM} ${PACKAGE_NAME}
