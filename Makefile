@@ -37,5 +37,9 @@ upload:
 		echo "VERSION ($(VERSION)) and GIT_VERSION ($(GIT_VERSION)) do not match"; \
 		exit 1; \
 	fi
+	@if ! git diff-index --quiet HEAD --; then \
+		echo "There are unstaged changes in tracked files. Please commit or stash them."; \
+		exit 1; \
+	fi
 	viam module update
 	viam module upload --version=${VERSION} --platform=${PLATFORM} ${PACKAGE_NAME}
