@@ -20,8 +20,11 @@ build: clean
 	mkdir -p ./python/dist
 	cp ./python/init.sh python/dist/init.sh
 	cp ./python/run.sh python/dist/run.sh
-	python3 -m venv .venv
-	./.venv/bin/pip3 install -r python/requirements.txt
+	@if [ ! -d .venv ]; then \
+		echo "Creating virtual environment..."; \
+		python3 -m venv .venv; \
+		./.venv/bin/pip3 install -r python/requirements.txt; \
+	fi
 	cd python; ../.venv/bin/python3 -m PyInstaller --onefile --hidden-import="googleapiclient" --add-binary="../.venv/lib/python3.11/site-packages/viam/rpc/libviam_rust_utils.so:viam/rpc/" module.py
 	tar -czvf ${PACKAGE_NAME} meta.json -C python/dist module init.sh run.sh
 
@@ -33,6 +36,7 @@ clean:
 clean-full: clean
 	rm -rf python/module.spec
 	rm -rf python/build
+	rm -rf .venv
 
 upload: build
 	@if [ "$(VERSION)" != "$(GIT_VERSION)" ]; then \
