@@ -32,7 +32,7 @@ clean:
 	rm -rf python/build
 	rm -rf python/module.spec
 
-upload:
+upload: build
 	@if [ "$(VERSION)" != "$(GIT_VERSION)" ]; then \
 		echo "VERSION ($(VERSION)) and GIT_VERSION ($(GIT_VERSION)) do not match"; \
 		exit 1; \
