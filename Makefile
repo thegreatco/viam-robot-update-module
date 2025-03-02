@@ -29,8 +29,10 @@ clean:
 	rm -rf ${PACKAGE_NAME}
 	rm -rf go/bin
 	rm -rf python/dist
-	rm -rf python/build
+
+clean-full: clean
 	rm -rf python/module.spec
+	rm -rf python/build
 
 upload: build
 	@if [ "$(VERSION)" != "$(GIT_VERSION)" ]; then \
